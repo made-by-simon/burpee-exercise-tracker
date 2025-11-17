@@ -1,212 +1,196 @@
 """
-Burpee Tracker with Real-time Video Feed
-Robust body marker tracking for accurate burpee counting
+Burpee Tracker with Simplified Hand Tracking
+Counts reps when hands reach top of frame
 """
 
 import cv2
 import mediapipe as mp
-import numpy as np
-from flask import Flask, Response, render_template_string, request, jsonify
 import time
+from flask import Flask, Response, render_template_string, request, jsonify
 
-app = Flask(__name__)
+app = Flask(__name__)  # WSGI for browser interface. 
 
 
 class Tracker:
-    """Tracks burpee count, time, and workout state with robust detection"""
+    """
+    Class containing core logic for tracking burpees.
+    Flow control is handled by "start", "pause", "resume", and "reset" classes. 
+    """
     
     def __init__(self):
+        """Initialize class variables."""
         self.count = 0
         self.target = 0
-        self.stage = 'down'
-        self.active = False
+        self.active = False  
         self.start_time = None
         self.paused_time = 0
-        self.rep_times = []
+        self.hands_at_top = False
     
     def start(self, target_reps):
+        """Set tracker variables for initial start."""
         self.count = 0
         self.target = target_reps
-        self.stage = 'down'
         self.start_time = time.time()
         self.paused_time = 0
-        self.rep_times = []
         self.active = True
+        self.hands_at_top = False
     
     def pause(self):
+        """Set tracker variables for pausing."""
         if self.active:
             self.paused_time = self.get_elapsed_time()
             self.active = False
     
     def resume(self):
+        """Set tracker variables for resuming."""
         if not self.active and self.start_time:
             self.start_time = time.time() - self.paused_time
             self.active = True
     
     def reset(self):
+        """Reset tracker class."""
         self.__init__()
     
-    def update_state(self, body_state):
-        """Update state based on body visibility"""
-        if not self.active:
+    def update(self, hand_y_pos):
+        """Keep track when hands reach top of frame."""
+        if not self.active or hand_y_pos is None:
             return
         
-        if body_state is None:
-            if self.stage != 'down':
-                self.stage = 'down'
-                self.count += 1
-                
-                if self.rep_times:
-                    self.rep_times.append(time.time() - sum(self.rep_times) - self.start_time)
-                else:
-                    self.rep_times.append(time.time() - self.start_time)
-            return
+        # Hands are considered to be "at the top" if they are in the top 10% vertical range (y) of the frame.
+        # Vertical range (y) is measured from the top (zero at the top).
+        at_top = hand_y_pos < 0.1
         
-        is_visible = body_state['is_visible']
-        
-        if is_visible:
-            if self.stage != 'up':
-                self.stage = 'up'
-        else:
-            if self.stage != 'down':
-                self.stage = 'down'
-                self.count += 1
-                
-                if self.rep_times:
-                    self.rep_times.append(time.time() - sum(self.rep_times) - self.start_time)
-                else:
-                    self.rep_times.append(time.time() - self.start_time)
+        # Increment burpee count when hands get to the top. 
+        if at_top and not self.hands_at_top:
+            self.count += 1
+            self.hands_at_top = True
+        elif not at_top:
+            self.hands_at_top = False
     
     def get_elapsed_time(self):
+        """Get relevant time interval (active time if not pasued), (paused time if paused)."""
         if not self.start_time:
             return 0
-        if self.active:
-            return time.time() - self.start_time
-        return self.paused_time
-    
-    def get_speed(self):
-        elapsed = self.get_elapsed_time()
-        return (self.count / elapsed) * 60 if elapsed > 0 and self.count > 0 else 0
+        # Elapsed time is determined differently depending on active status. 
+        return time.time() - self.start_time if self.active else self.paused_time  
     
     def get_metrics(self):
+        """Retrieve/calculate metrics then pack them into a dictionary."""
+        elapsed = self.get_elapsed_time()
+        speed = (self.count / elapsed * 60) if elapsed > 0 else 0
+        
         return {
-            'count': self.count,
-            'target': self.target,
-            'time': int(self.get_elapsed_time()),
-            'speed': self.get_speed(),
-            'stage': self.stage,
-            'active': self.active,
-            'complete': self.target > 0 and self.count >= self.target
+            "count": self.count,
+            "target": self.target,
+            "time": int(elapsed),
+            "speed": speed,
+            "stage": "Up" if self.hands_at_top else "Down",
+            "active": self.active,
+            "complete": self.target > 0 and self.count >= self.target
         }
 
 
 class Camera:
-    """Captures and processes camera feed with body marker detection"""
-    
+    """
+    Class handling camera and computer vision.
+    OpenCV (cv2) is used for video input and computer vision.
+    MediaPipe (mp) is used for pose estimation / body marking. 
+    """
+
     def __init__(self):
-        self.mp_pose = mp.solutions.pose
+        """Initialize class variables."""
+        self.mp_pose = mp.solutions.pose  # Store reference to MediaPipe Pose module.
+        # Create pose estimation object. 
         self.pose = self.mp_pose.Pose(
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.7,
-            model_complexity=1
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5 
         )
+        # Use webcam with VGA resolution. 
         self.camera = cv2.VideoCapture(0)
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
     def get_frame(self):
+        """Get frame from webcam."""
         success, frame = self.camera.read()
-        return frame if success else None
+        return cv2.flip(frame, 1) if success else None  # Flip frame horizontally.
     
-    def get_body_state(self, landmarks):
-        """Determine if body is visible based on landmark visibility"""
-        nose = landmarks[self.mp_pose.PoseLandmark.NOSE.value]
-        left_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER.value]
-        right_shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
-        left_hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP.value]
-        right_hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP.value]
+    def get_hand_position(self, landmarks):
+        """Get highest hand/elbow position (lowest y value)"""
         
-        nose_visible = nose.visibility > 0.5
-        shoulders_visible = (left_shoulder.visibility > 0.5 and right_shoulder.visibility > 0.5)
-        hips_visible = (left_hip.visibility > 0.5 and right_hip.visibility > 0.5)
+        # Get specific points from the list of landmarks (there are 33). 
+        left_wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST.value]
+        right_wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST.value]
+        left_elbow = landmarks[self.mp_pose.PoseLandmark.LEFT_ELBOW.value]
+        right_elbow = landmarks[self.mp_pose.PoseLandmark.RIGHT_ELBOW.value]
         
-        is_visible = nose_visible and shoulders_visible and hips_visible
+        # Collect all points that are not obscured or occluded. 
+        points = []
+        if left_wrist.visibility > 0.5:
+            points.append(left_wrist.y)
+        if right_wrist.visibility > 0.5:
+            points.append(right_wrist.y)
+        if left_elbow.visibility > 0.5:
+            points.append(left_elbow.y)
+        if right_elbow.visibility > 0.5:
+            points.append(right_elbow.y)
         
-        return {
-            'is_visible': is_visible,
-            'nose_y': nose.y
-        }
-    
-    def get_user_state(self, frame):
-        """Process frame and return body state"""
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image.flags.writeable = False
-        results = self.pose.process(image)
-        
-        if not results.pose_landmarks:
-            return None
-        
-        landmarks = results.pose_landmarks.landmark
-        return self.get_body_state(landmarks)
+        # Return the highest point (lowest y value). 
+        return min(points) if points else None
     
     def draw_skeleton(self, frame, landmarks):
-        """Draw skeleton overlay on frame"""
-        h, w, _ = frame.shape
+        """Draw simple skeleton overlay"""
+        h, w = frame.shape[:2]
         
+        # Define connections. 
         connections = [
-            (self.mp_pose.PoseLandmark.LEFT_SHOULDER, self.mp_pose.PoseLandmark.RIGHT_SHOULDER),
-            (self.mp_pose.PoseLandmark.LEFT_SHOULDER, self.mp_pose.PoseLandmark.LEFT_HIP),
-            (self.mp_pose.PoseLandmark.RIGHT_SHOULDER, self.mp_pose.PoseLandmark.RIGHT_HIP),
-            (self.mp_pose.PoseLandmark.LEFT_HIP, self.mp_pose.PoseLandmark.RIGHT_HIP),
-            (self.mp_pose.PoseLandmark.LEFT_HIP, self.mp_pose.PoseLandmark.LEFT_KNEE),
-            (self.mp_pose.PoseLandmark.RIGHT_HIP, self.mp_pose.PoseLandmark.RIGHT_KNEE),
-            (self.mp_pose.PoseLandmark.LEFT_KNEE, self.mp_pose.PoseLandmark.LEFT_ANKLE),
-            (self.mp_pose.PoseLandmark.RIGHT_KNEE, self.mp_pose.PoseLandmark.RIGHT_ANKLE),
-            (self.mp_pose.PoseLandmark.LEFT_SHOULDER, self.mp_pose.PoseLandmark.LEFT_WRIST),
-            (self.mp_pose.PoseLandmark.RIGHT_SHOULDER, self.mp_pose.PoseLandmark.RIGHT_WRIST),
+            """
+            Landmark indices from MediaPipe Pose module: 
+                11: left shoulder
+                12: right shoulder
+                13: left elbow
+                14: right elbow
+                15: left wrist
+                16: right wrist
+                23: left hip
+                24: right hip
+                25: left knee
+                26: right knee
+                27: left ankle
+                28: right ankle
+            """
+            (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),  # Arms. 
+            (11, 23), (12, 24), (23, 24),  # Torso. 
+            (23, 25), (25, 27), (24, 26), (26, 28)  # Legs. 
         ]
         
-        for connection in connections:
-            start = landmarks[connection[0].value]
-            end = landmarks[connection[1].value]
-            start_pos = (int(start.x * w), int(start.y * h))
-            end_pos = (int(end.x * w), int(end.y * h))
-            cv2.line(frame, start_pos, end_pos, (0, 255, 0), 4)
+        # Draw lines. 
+        for start_idx, end_idx in connections:
+            start = landmarks[start_idx]
+            end = landmarks[end_idx]
+            if start.visibility > 0.5 and end.visibility > 0.5:
+                start_pos = (int(start.x * w), int(start.y * h))
+                end_pos = (int(end.x * w), int(end.y * h))
+                cv2.line(frame, start_pos, end_pos, (0, 255, 0), 4)
         
-        key_points = [
-            self.mp_pose.PoseLandmark.NOSE,
-            self.mp_pose.PoseLandmark.LEFT_SHOULDER,
-            self.mp_pose.PoseLandmark.RIGHT_SHOULDER,
-            self.mp_pose.PoseLandmark.LEFT_HIP,
-            self.mp_pose.PoseLandmark.RIGHT_HIP,
-            self.mp_pose.PoseLandmark.LEFT_KNEE,
-            self.mp_pose.PoseLandmark.RIGHT_KNEE,
-            self.mp_pose.PoseLandmark.LEFT_ANKLE,
-            self.mp_pose.PoseLandmark.RIGHT_ANKLE,
-            self.mp_pose.PoseLandmark.LEFT_WRIST,
-            self.mp_pose.PoseLandmark.RIGHT_WRIST,
-        ]
-        
-        for point in key_points:
-            landmark = landmarks[point.value]
-            pos = (int(landmark.x * w), int(landmark.y * h))
-            cv2.circle(frame, pos, 8, (0, 255, 0), -1)
+        # Draw nodes (line connection points).
+        for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
+            landmark = landmarks[idx]
+            if landmark.visibility > 0.5:
+                pos = (int(landmark.x * w), int(landmark.y * h))
+                cv2.circle(frame, pos, 8, (0, 255, 0), -1)
     
     def process_frame(self, frame):
-        """Process frame with pose detection and visualization"""
-        frame = cv2.flip(frame, 1)
+        """Process frame and return annotated frame and hand position"""
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.pose.process(rgb_frame)
         
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image.flags.writeable = False
-        results = self.pose.process(image)
-        
-        image.flags.writeable = True
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        
+        hand_pos = None
         if results.pose_landmarks:
-            self.draw_skeleton(image, results.pose_landmarks.landmark)
+            self.draw_skeleton(frame, results.pose_landmarks.landmark)
+            hand_pos = self.get_hand_position(results.pose_landmarks.landmark)
         
-        return image
+        return frame, hand_pos
     
     def release(self):
         self.camera.release()
@@ -217,32 +201,32 @@ camera = Camera()
 
 
 def generate_frames():
+    """Generator continuously grabs and processes frames then yiels image encoded as JPEG in binary stream."""
     while True:
         frame = camera.get_frame()
         if frame is None:
             break
         
-        user_state = camera.get_user_state(frame)
-        if user_state:
-            tracker.update_state(user_state)
+        annotated_frame, hand_pos = camera.process_frame(frame)
+        tracker.update(hand_pos)
         
-        annotated_frame = camera.process_frame(frame)
-        
-        ret, buffer = cv2.imencode('.jpg', annotated_frame)
-        frame_bytes = buffer.tobytes()
-        
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        ret, buffer = cv2.imencode(".jpg", annotated_frame)
+        # Yield multi-part stream so that web server can stream live to browser.  
+        yield (b"--frame\r\n"
+               b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n")
 
 
-@app.route('/metrics')
+# HTTP endpoint for metrics. 
+@app.route("/metrics")
 def get_metrics():
     return jsonify(tracker.get_metrics())
 
 
-@app.route('/')
+# HTTP endpoint that serves the main web UI for the burpee tracker. 
+# Render the full HTML/CSS/JavaScript interface (setup screen, live video feed, and real-time metrics).
+@app.route("/")
 def index():
-    return render_template_string('''
+    return render_template_string("""
         <!DOCTYPE html>
         <html>
         <head>
@@ -262,13 +246,13 @@ def index():
                     overflow: hidden;
                 }
                 body {
-                    font-family: 'Inter', sans-serif;
+                    font-family: "Inter", sans-serif;
                     background: linear-gradient(135deg, #1a4c75 0%, #03080d 100%);
                     color: #f2f8fc;
                     position: relative;
                 }
                 body::before {
-                    content: '';
+                    content: "";
                     position: absolute;
                     top: 0;
                     left: 0;
@@ -324,7 +308,7 @@ def index():
                     border: 2px solid rgba(148, 163, 184, 0.2);
                     border-radius: 12px;
                     color: #f2f8fc;
-                    font-family: 'Inter', sans-serif;
+                    font-family: "Inter", sans-serif;
                     text-align: center;
                     transition: all 0.3s ease;
                     box-sizing: border-box;
@@ -351,11 +335,11 @@ def index():
                     position: relative;
                     overflow: hidden;
                     letter-spacing: 0.8px;
-                    font-family: 'Inter', sans-serif;
+                    font-family: "Inter", sans-serif;
                     transition: all 0.2s;
                 }
                 .setup-button::before {
-                    content: '';
+                    content: "";
                     position: absolute;
                     top: 0;
                     left: -100%;
@@ -480,7 +464,7 @@ def index():
                     transition: all 0.2s;
                     text-transform: uppercase;
                     letter-spacing: 0.8px;
-                    font-family: 'Inter', sans-serif;
+                    font-family: "Inter", sans-serif;
                     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
                     border: 1px solid rgba(45, 133, 205, 0.3);
                 }
@@ -503,7 +487,7 @@ def index():
                     border: none;
                 }
                 button.primary::before {
-                    content: '';
+                    content: "";
                     position: absolute;
                     top: 0;
                     left: -100%;
@@ -576,7 +560,7 @@ def index():
                 
                 <div class="video-section">
                     <div class="video-container">
-                        <img src="{{ url_for('video_feed') }}" alt="Video Feed" />
+                        <img src="{{ url_for("video_feed") }}" alt="Video Feed" />
                     </div>
                     
                     <div class="controls">
@@ -590,111 +574,105 @@ def index():
                 let metricsInterval = null;
                 
                 function updateMetrics() {
-                    fetch('/metrics')
+                    fetch("/metrics")
                         .then(response => response.json())
                         .then(data => {
-                            document.getElementById('countValue').textContent = data.count;
-                            document.getElementById('targetValue').textContent = data.target;
+                            document.getElementById("countValue").textContent = data.count;
+                            document.getElementById("targetValue").textContent = data.target;
                             
                             const minutes = Math.floor(data.time / 60);
                             const seconds = data.time % 60;
-                            document.getElementById('timeValue').textContent = 
-                                `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                            document.getElementById("timeValue").textContent = 
+                                `${minutes}:${seconds.toString().padStart(2, "0")}`;
                             
-                            document.getElementById('speedValue').textContent = data.speed.toFixed(1);
+                            document.getElementById("speedValue").textContent = data.speed.toFixed(1);
                             
-                            const stageEl = document.getElementById('stageValue');
-                            const statusEl = document.getElementById('statusValue');
-                            const countEl = document.getElementById('countValue');
+                            const stageEl = document.getElementById("stageValue");
+                            const statusEl = document.getElementById("statusValue");
+                            const countEl = document.getElementById("countValue");
                             
-                            if (data.stage === 'down') {
-                                stageEl.textContent = 'Down';
-                            } else if (data.stage === 'up') {
-                                stageEl.textContent = 'Up';
-                            } else {
-                                stageEl.textContent = 'Down';
-                            }
+                            stageEl.textContent = data.stage;
                             
                             if (data.complete) {
-                                statusEl.textContent = 'COMPLETE';
-                                statusEl.className = 'stat-value complete';
-                                countEl.className = 'stat-value complete';
+                                statusEl.textContent = "COMPLETE";
+                                statusEl.className = "stat-value complete";
+                                countEl.className = "stat-value complete";
                             } else if (!data.active && data.time > 0) {
-                                statusEl.textContent = 'Paused';
-                                statusEl.className = 'stat-value';
-                                countEl.className = 'stat-value';
+                                statusEl.textContent = "Paused";
+                                statusEl.className = "stat-value";
+                                countEl.className = "stat-value";
                             } else if (data.active) {
-                                statusEl.textContent = 'Ready';
-                                statusEl.className = 'stat-value';
-                                countEl.className = 'stat-value';
+                                statusEl.textContent = "Ready";
+                                statusEl.className = "stat-value";
+                                countEl.className = "stat-value";
                             } else {
-                                statusEl.textContent = 'Ready';
-                                statusEl.className = 'stat-value';
-                                countEl.className = 'stat-value';
+                                statusEl.textContent = "Ready";
+                                statusEl.className = "stat-value";
+                                countEl.className = "stat-value";
                             }
                         });
                 }
                 
                 function startWorkout() {
-                    const target = document.getElementById('targetReps').value;
+                    const target = document.getElementById("targetReps").value;
                     if (target < 1) {
-                        alert('Please enter a valid number of burpees');
+                        alert("Please enter a valid number of burpees");
                         return;
                     }
                     
-                    fetch('/start', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                    fetch("/start", {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json"},
                         body: JSON.stringify({target: parseInt(target)})
                     }).then(() => {
-                        document.getElementById('setupSection').style.display = 'none';
-                        document.getElementById('workoutSection').style.display = 'flex';
+                        document.getElementById("setupSection").style.display = "none";
+                        document.getElementById("workoutSection").style.display = "flex";
                         metricsInterval = setInterval(updateMetrics, 100);
                     });
                 }
                 
                 function pauseWorkout() {
-                    fetch('/pause', {method: 'POST'}).then(() => {
-                        document.getElementById('pauseBtn').style.display = 'none';
-                        document.getElementById('resumeBtn').style.display = 'inline-block';
+                    fetch("/pause", {method: "POST"}).then(() => {
+                        document.getElementById("pauseBtn").style.display = "none";
+                        document.getElementById("resumeBtn").style.display = "inline-block";
                     });
                 }
                 
                 function resumeWorkout() {
-                    fetch('/resume', {method: 'POST'}).then(() => {
-                        document.getElementById('pauseBtn').style.display = 'inline-block';
-                        document.getElementById('resumeBtn').style.display = 'none';
+                    fetch("/resume", {method: "POST"}).then(() => {
+                        document.getElementById("pauseBtn").style.display = "inline-block";
+                        document.getElementById("resumeBtn").style.display = "none";
                     });
                 }
                 
                 function resetWorkout() {
-                    fetch('/reset', {method: 'POST'}).then(() => {
+                    fetch("/reset", {method: "POST"}).then(() => {
                         if (metricsInterval) {
                             clearInterval(metricsInterval);
                             metricsInterval = null;
                         }
-                        document.getElementById('setupSection').style.display = 'flex';
-                        document.getElementById('workoutSection').style.display = 'none';
-                        document.getElementById('pauseBtn').style.display = 'inline-block';
-                        document.getElementById('resumeBtn').style.display = 'none';
+                        document.getElementById("setupSection").style.display = "flex";
+                        document.getElementById("workoutSection").style.display = "none";
+                        document.getElementById("pauseBtn").style.display = "inline-block";
+                        document.getElementById("resumeBtn").style.display = "none";
                     });
                 }
                 
                 // Keyboard shortcuts
-                document.addEventListener('keydown', function(e) {
+                document.addEventListener("keydown", function(e) {
                     // Enter key - start workout
-                    if (e.key === 'Enter' && document.getElementById('setupSection').style.display !== 'none') {
+                    if (e.key === "Enter" && document.getElementById("setupSection").style.display !== "none") {
                         e.preventDefault();
                         startWorkout();
                     }
                     
                     // Space key - pause/resume workout
-                    if (e.key === ' ' && document.getElementById('workoutSection').style.display !== 'none') {
+                    if (e.key === " " && document.getElementById("workoutSection").style.display !== "none") {
                         e.preventDefault();
-                        const pauseBtn = document.getElementById('pauseBtn');
-                        const resumeBtn = document.getElementById('resumeBtn');
+                        const pauseBtn = document.getElementById("pauseBtn");
+                        const resumeBtn = document.getElementById("resumeBtn");
                         
-                        if (pauseBtn.style.display !== 'none') {
+                        if (pauseBtn.style.display !== "none") {
                             pauseWorkout();
                         } else {
                             resumeWorkout();
@@ -704,42 +682,47 @@ def index():
             </script>
         </body>
         </html>
-    ''')
+    """)
 
 
-@app.route('/video_feed')
+# HTTP endpoint for video feed. 
+@app.route("/video_feed")
 def video_feed():
     return Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
-@app.route('/start', methods=['POST'])
+# HTTP endpoint for starting workout with given target. 
+@app.route("/start", methods=["POST"])
 def start_workout():
     data = request.get_json()
-    target = data.get('target', 20)
+    target = data.get("target", 20)
     tracker.start(target)
-    return {'status': 'started'}
+    return {"status": "started"}
 
 
-@app.route('/pause', methods=['POST'])
+# HTTP endpoint for pausing workout. 
+@app.route("/pause", methods=["POST"])
 def pause_workout():
     tracker.pause()
-    return {'status': 'paused'}
+    return {"status": "paused"}
 
 
-@app.route('/resume', methods=['POST'])
+# HTTP endpoint for resuming workout. 
+@app.route("/resume", methods=["POST"])
 def resume_workout():
     tracker.resume()
-    return {'status': 'resumed'}
+    return {"status": "resumed"}
 
 
-@app.route('/reset', methods=['POST'])
+# HTTP endpoint for resetting workout (resets entire app/interface). 
+@app.route("/reset", methods=["POST"])
 def reset_workout():
     tracker.reset()
-    return {'status': 'reset'}
+    return {"status": "reset"}
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("Starting Burpee Tracker...")
     print("Open your browser and navigate to: http://localhost:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
