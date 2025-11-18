@@ -77,7 +77,7 @@ class Tracker:
     def get_metrics(self):
         """Retrieve/calculate metrics then pack them into a dictionary."""
         elapsed = self.get_elapsed_time()
-        speed = (self.count / elapsed * 60) if elapsed > 0 else 0
+        speed = (self.count / elapsed * 60) if elapsed > 0 else 0  # Speed in burpees per minute. 
         
         return {
             "count": self.count,
@@ -102,8 +102,8 @@ class Camera:
         self.mp_pose = mp.solutions.pose  # Store reference to MediaPipe Pose module.
         # Create pose estimation object. 
         self.pose = self.mp_pose.Pose(
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5 
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7 
         )
         # Use webcam with VGA resolution. 
         self.camera = cv2.VideoCapture(0)
@@ -143,8 +143,7 @@ class Camera:
         h, w = frame.shape[:2]
         
         # Define connections. 
-        connections = [
-            """
+        """
             Landmark indices from MediaPipe Pose module: 
                 11: left shoulder
                 12: right shoulder
@@ -158,7 +157,8 @@ class Camera:
                 26: right knee
                 27: left ankle
                 28: right ankle
-            """
+        """
+        connections = [
             (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),  # Arms. 
             (11, 23), (12, 24), (23, 24),  # Torso. 
             (23, 25), (25, 27), (24, 26), (26, 28)  # Legs. 
@@ -543,7 +543,7 @@ def index():
                     </div>
                     
                     <div class="stat-card">
-                        <div class="stat-label">Speed</div>
+                        <div class="stat-label">Burpees/Min</div>
                         <div class="stat-value" id="speedValue">0</div>
                     </div>
                     
@@ -723,6 +723,9 @@ def reset_workout():
 
 
 if __name__ == "__main__":
-    print("Starting Burpee Tracker...")
-    print("Open your browser and navigate to: http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    try: 
+        print("Starting Burpee Tracker...")
+        print("Open your browser and navigate to: http://localhost:5000")
+        app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    finally: 
+        camera.release()
