@@ -450,7 +450,28 @@ def index():
                     display: flex;
                     gap: 12px;
                     justify-content: center;
-                    flex-shrink: 0;
+                }
+
+                .controls button {
+                    padding: 14px 28px;
+                    font-size: 13px;
+                    font-weight: 700;
+                    border: none; 
+                    border-radius: 8px;
+                    cursor: pointer;
+                    background: #2d85cd;
+                    color: #f2f8fc;
+                    font-family: "Inter", sans-serif;
+                    letter-spacing: 0.8px;
+                    transition: all 0.2s;
+                    box-shadow: 0 4px 12px rgba(45, 133, 205, 0.4);
+                }
+
+                .controls button:hover {
+                    background: #3a9be0;
+                    transform: translateY(-2px);
+                    box-shadow: 0 6px 16px rgba(45, 133, 205, 0.5);
+                }
                 }
                 button {
                     padding: 12px 28px;
@@ -517,7 +538,7 @@ def index():
                 <h1 class="setup-title">Burpee Tracker</h1>
                 <p class="setup-subtitle">Track your burpee workout with real-time body tracking and speed metrics.</p>
                 <input type="number" class="setup-input" id="targetReps" min="1" value="100" />
-                <button class="setup-button" onclick="startWorkout()">Start Burpees</button>
+                <button class="setup-button" onclick="startWorkout()">START BURPEES</button>
                 
                 <div class="setup-footer">
                     <a href="https://simonwong.site" target="_blank" rel="noopener noreferrer">Visit simonwong.site</a>
@@ -548,14 +569,10 @@ def index():
                     </div>
                     
                     <div class="stat-card">
-                        <div class="stat-label">Stage</div>
+                        <div class="stat-label">Position</div>
                         <div class="stat-value" id="stageValue">Down</div>
                     </div>
                     
-                    <div class="stat-card">
-                        <div class="stat-label">Status</div>
-                        <div class="stat-value" id="statusValue">Ready</div>
-                    </div>
                 </div>
                 
                 <div class="video-section">
